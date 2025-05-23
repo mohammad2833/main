@@ -1,3 +1,6 @@
+import numpy as np
+np.__version__ = '1.24.3'  # Force numpy version
+import pandas as pd
 import os
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
