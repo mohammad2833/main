@@ -12,7 +12,7 @@ from telegram.ext import (
     CallbackQueryHandler,
     ConversationHandler) # این پرانتز بسته بود که جا افتاده بود
 
-TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')  # خواندن توکن از متغیر محیطی
+TOKEN = os.environ.get('8008850402:AAG9SS8l-MuwJphP1DvcQMWi8-snStav6gc')  # خواندن توکن از متغیر محیطی
 if not TOKEN:
     raise ValueError("لطفاً توکن ربات را در TELEGRAM_BOT_TOKEN تنظیم کنید!")
 
