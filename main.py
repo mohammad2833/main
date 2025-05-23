@@ -8,11 +8,11 @@ from telegram.ext import (
     filters,
     CallbackQueryHandler,
     ConversationHandler
-import os
+)  # این پرانتز بسته بود که جا افتاده بود
+
 TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')  # خواندن توکن از متغیر محیطی
 if not TOKEN:
     raise ValueError("لطفاً توکن ربات را در TELEGRAM_BOT_TOKEN تنظیم کنید!")
-    
 )
 import pandas as pd
 from datetime import datetime
