@@ -1,5 +1,6 @@
 python-telegram-bot==20.3
 pandas==2.0.3
+numpy==1.24.3  # این نسخه با pandas 2.0.3 سازگار است
 apscheduler==3.10.1
 persiantools==5.2.0
 openpyxl==3.1.2
