@@ -1,0 +1,7 @@
+python-telegram-bot==20.3
+pandas==2.0.3
+apscheduler==3.10.1
+persiantools==2.1.0
+openpyxl==3.1.2
+pillow==10.0.0
+requests==2.31.0
