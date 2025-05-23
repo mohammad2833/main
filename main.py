@@ -18,7 +18,13 @@ if not TOKEN:
 
 import pandas as pd
 from datetime import datetime
-from jdatetime import datetime as jdt
+    from jdatetime import datetime as jdt
+except ImportError:
+    # Fallback برای زمانی که jdatetime نصب نیست
+    from datetime import datetime as dt
+    jdt = dt  # استفاده از datetime معمولی به جای jdatetime
+    print("Warning: jdatetime not installed, using standard datetime")
+
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from PIL import Image
 import requests
