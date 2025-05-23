@@ -1,56 +1,128 @@
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler, ConversationHandler
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 import os
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+    CallbackQueryHandler,
+    ConversationHandler
+TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')  # خواندن توکن از متغیر محیطی
+if not TOKEN:
+    raise ValueError("لطفاً توکن ربات را در TELEGRAM_BOT_TOKEN تنظیم کنید!")
+)
 import pandas as pd
 from datetime import datetime
 from jdatetime import datetime as jdt
-from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from PIL import Image
 import requests
 from io import BytesIO
+import sqlite3
+import logging
 
-# توکن ربات
-TOKEN = '8008850402:AAG9SS8l-MuwJphP1DvcQMWi8-snStav6gc'
+# تنظیمات لاگ‌گیری
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
-# وضعیت‌های سرویس
-(NAME, FAMILY, PHONE,
- LOCATION_START, CONFIRM_END,
- TYPE_SERVICE, AMOUNT_MANUAL,
- PAYMENT_TYPE, PHOTO_UPLOAD, AMOUNT_RECEIVED,
- CLIENT_NAME, CLIENT_PHONE, DESCRIPTION,
- EVENT_DESC, EVENT_TIME) = range(14)
+# وضعیت‌های مکالمه
+(NAME, FAMILY, PHONE, LOCATION_START, CONFIRM_END, TYPE_SERVICE, 
+ AMOUNT_MANUAL, PAYMENT_TYPE, PHOTO_UPLOAD, AMOUNT_RECEIVED,
+ CLIENT_NAME, CLIENT_PHONE, DESCRIPTION, EVENT_DESC, EVENT_TIME) = range(15)
 
-# دایرکتوری اصلی
-BASE_DIR = 'خدمات'
+# دایرکتوری اصلی و تنظیمات دیتابیس
+BASE_DIR = 'services'
 os.makedirs(BASE_DIR, exist_ok=True)
+DB_PATH = os.path.join(BASE_DIR, 'services.db')
 
-# فایل‌های اکسل
-USERS_FILE = os.path.join(BASE_DIR, 'رانندگان.xlsx')
-SERVICES_FILE = os.path.join(BASE_DIR, 'سرویس_ها.xlsx')
-
-# تاریخ شمسی
+# توابع کمکی
 def jalali_now():
     return jdt.now().strftime("%Y/%m/%d %H:%M")
 
-def gregorian_to_jalali(dt):
-    return jdt.fromgregorian(datetime=dt).strftime("%Y/%m/%d %H:%M")
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    
+    # جدول رانندگان
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS drivers (
+        user_id INTEGER PRIMARY KEY,
+        name TEXT,
+        family TEXT,
+        phone TEXT,
+        username TEXT
+    )
+    ''')
+    
+    # جدول سرویس‌ها
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS services (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        start_time TEXT,
+        end_time TEXT,
+        service_type TEXT,
+        calculated_amount INTEGER,
+        received_amount INTEGER,
+        bonus INTEGER,
+        discount INTEGER,
+        client_name TEXT,
+        client_phone TEXT,
+        description TEXT,
+        FOREIGN KEY(user_id) REFERENCES drivers(user_id)
+    ''')
+    
+    conn.commit()
+    conn.close()
 
-def create_service_folder(user_data):
-    name = user_data.get('name', 'کاربر')
-    user_id = user_data.get('user_id', 'ناشناس')
-    folder_name = f"{name}_{user_id}"
-    folder_path = os.path.join(BASE_DIR, folder_name)
-    os.makedirs(folder_path, exist_ok=True)
-    return folder_path
+def save_driver(user_data):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+    INSERT OR REPLACE INTO drivers (user_id, name, family, phone, username)
+    VALUES (?, ?, ?, ?, ?)
+    ''', (
+        user_data['user_id'],
+        user_data['name'],
+        user_data['family'],
+        user_data['phone'],
+        user_data.get('username', '')
+    ))
+    
+    conn.commit()
+    conn.close()
 
-def save_service_data(data):
-    df = pd.DataFrame([data])
-    if not os.path.exists(SERVICES_FILE):
-        df.to_excel(SERVICES_FILE, index=False)
-    else:
-        with pd.ExcelWriter(SERVICES_FILE, mode='a', engine='openpyxl', if_sheet_exists='append') as writer:
-            df.to_excel(writer, index=False, header=not os.path.exists(SERVICES_FILE))
+def save_service(service_data):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+    INSERT INTO services (
+        user_id, start_time, end_time, service_type,
+        calculated_amount, received_amount, bonus,
+        discount, client_name, client_phone, description
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (
+        service_data['user_id'],
+        service_data['start_time'],
+        service_data['end_time'],
+        service_data['service_type'],
+        service_data.get('calculated_amount', 0),
+        service_data.get('received_amount', 0),
+        service_data.get('bonus', 0),
+        service_data.get('discount', 0),
+        service_data.get('client_name', ''),
+        service_data.get('client_phone', ''),
+        service_data.get('description', '')
+    ))
+    
+    conn.commit()
+    conn.close()
 
 # دستور /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -61,16 +133,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         'username': user.username or ''
     }
     context.user_data.update(user_data)
-
-    if os.path.exists(USERS_FILE):
-        try:
-            df_users = pd.read_excel(USERS_FILE)
-            if user.id in df_users.values:
-                await show_main_menu(update, context)
-                return ConversationHandler.END
-        except Exception:
-            pass
-
+    
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    
+    cursor.execute('SELECT 1 FROM drivers WHERE user_id = ?', (user.id,))
+    exists = cursor.fetchone()
+    conn.close()
+    
+    if exists:
+        await show_main_menu(update, context)
+        return ConversationHandler.END
+    
     await update.message.reply_text("سلام! لطفاً نام خود را وارد کنید:")
     return NAME
 
@@ -86,26 +160,12 @@ async def get_family(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def get_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     phone = update.message.text.strip()
-    if not phone.startswith("09") or len(phone) != 11 or not phone.isdigit():
-        await update.message.reply_text("شماره تماس نامعتبر است.")
+    if not (phone.startswith("09") and len(phone) == 11 and phone.isdigit()):
+        await update.message.reply_text("شماره تماس نامعتبر است. لطفاً شماره را با فرمت 09123456789 وارد کنید.")
         return PHONE
-
+    
     context.user_data['phone'] = phone
-
-    data = {
-        'کد کاربر': [context.user_data['user_id']],
-        'نام': [context.user_data['name']],
-        'نام خانوادگی': [context.user_data['family']],
-        'شماره تماس': [phone]
-    }
-    df = pd.DataFrame(data)
-
-    if not os.path.exists(USERS_FILE):
-        df.to_excel(USERS_FILE, index=False)
-    else:
-        with pd.ExcelWriter(USERS_FILE, mode='a', engine='openpyxl', if_sheet_exists='append') as writer:
-            df.to_excel(writer, index=False, header=False)
-
+    save_driver(context.user_data)
     await show_main_menu(update, context)
     return ConversationHandler.END
 
@@ -117,8 +177,17 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🗓️ ثبت رویداد", callback_data='event_register')]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    name = context.user_data.get('name', 'کاربر')
-    await update.message.reply_text(f"به منوی اصلی خوش آمدید {name} جان!", reply_markup=reply_markup)
+    
+    if update.message:
+        await update.message.reply_text(
+            f"به منوی اصلی خوش آمدید {context.user_data.get('name', 'کاربر')} جان!",
+            reply_markup=reply_markup
+        )
+    else:
+        await update.callback_query.edit_message_text(
+            f"به منوی اصلی خوش آمدید {context.user_data.get('name', 'کاربر')} جان!",
+            reply_markup=reply_markup
+        )
 
 # --- سرویس جدید ---
 async def new_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -131,87 +200,118 @@ async def location_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.location:
         loc = update.message.location
         context.user_data['location_start'] = (loc.latitude, loc.longitude)
-    await update.message.reply_text("⏰ شروع سرویس ثبت شد.")
+    
     context.user_data['start_time'] = datetime.now()
     context.user_data['jalali_start'] = jalali_now()
+    
     keyboard = [[InlineKeyboardButton("🔚 پایان سرویس", callback_data='end_service')]]
-    await update.message.reply_text("برای پایان سرویس دکمه زیر را بزنید.", reply_markup=InlineKeyboardMarkup(keyboard))
+    await update.message.reply_text(
+        "⏰ شروع سرویس ثبت شد. برای پایان سرویس دکمه زیر را بزنید.",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
     return ConversationHandler.END
 
 async def end_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    await query.edit_message_text("⚠️ مطمئن هستید؟ [بله] [خیر]")
-    keyboard = [[InlineKeyboardButton("✅ بله", callback_data='confirm_end'), InlineKeyboardButton("❌ خیر", callback_data='cancel_end')]]
-    await query.message.reply_text("آیا مطمئن هستید؟", reply_markup=InlineKeyboardMarkup(keyboard))
+    
+    keyboard = [
+        [InlineKeyboardButton("✅ بله", callback_data='confirm_end')],
+        [InlineKeyboardButton("❌ خیر", callback_data='cancel_end')]
+    ]
+    await query.edit_message_text(
+        "⚠️ آیا مطمئن هستید می‌خواهید سرویس را پایان دهید؟",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
     return CONFIRM_END
 
 async def confirm_end(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    
     context.user_data['end_time'] = datetime.now()
     context.user_data['jalali_end'] = jalali_now()
+    
     if update.message and update.message.location:
         loc = update.message.location
         context.user_data['location_end'] = (loc.latitude, loc.longitude)
-    await query.message.reply_text("نوع سرویس را انتخاب کنید:", reply_markup=InlineKeyboardMarkup([
+    
+    keyboard = [
         [InlineKeyboardButton("⏰ ساعتی", callback_data='type_hourly')],
         [InlineKeyboardButton("📦 پروژه‌ای", callback_data='type_project')]
-    ]))
+    ]
+    await query.edit_message_text(
+        "نوع سرویس را انتخاب کنید:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
     return TYPE_SERVICE
 
 async def type_hourly(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    
     start = context.user_data['start_time']
     end = context.user_data['end_time']
     duration_minutes = (end - start).seconds // 60
-    fixed = 3_000_000
-    hourly = 12_000_000
+    
+    fixed = 3_000_000  # هزینه ثابت
+    hourly = 12_000_000  # هزینه ساعتی
     total = fixed + (duration_minutes // 60) * hourly
-    context.user_data['service_type'] = "ساعتی"
-    context.user_data['amount_calculated'] = total
-    context.user_data['duration_minutes'] = duration_minutes
-    await query.message.reply_text(f"💰 مبلغ محاسبه‌شده: {total:,} ریال\nنوع پرداخت را انتخاب کنید:")
-    await query.message.reply_text("گزینه‌ها:", reply_markup=InlineKeyboardMarkup([
+    
+    context.user_data.update({
+        'service_type': "ساعتی",
+        'amount_calculated': total,
+        'duration_minutes': duration_minutes
+    })
+    
+    keyboard = [
         [InlineKeyboardButton("💳 کارتخوان", callback_data='payment_card_reader')],
         [InlineKeyboardButton("🏧 کارت به کارت", callback_data='payment_bank_transfer')],
         [InlineKeyboardButton("💵 نقدی", callback_data='payment_cash')],
         [InlineKeyboardButton("赊 نسیه", callback_data='payment_credit')]
-    ]))
+    ]
+    
+    await query.edit_message_text(
+        f"💰 مبلغ محاسبه‌شده: {total:,} ریال\n\nنوع پرداخت را انتخاب کنید:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
     return PAYMENT_TYPE
 
 async def payment_card_reader(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    
     context.user_data['payment_type'] = "کارتخوان"
-    await query.message.reply_text("📸 لطفاً تصویر رسید را بارگذاری کنید.")
+    await query.edit_message_text("📸 لطفاً تصویر رسید را بارگذاری کنید.")
     return PHOTO_UPLOAD
 
 async def photo_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     photo = update.message.photo[-1]
     file = await photo.get_file()
-    user_data = context.user_data
-    service_folder = create_service_folder(user_data)
-    photo_path = os.path.join(service_folder, f"رسید_{datetime.now().timestamp()}.jpg")
-    await file.download_to_drive(photo_path)
-    context.user_data['photo_path'] = photo_path
+    
+    # در Render سیستم فایل موقت است، پس تصویر را در حافظه نگه می‌داریم
+    photo_bytes = BytesIO()
+    await file.download_to_memory(out=photo_bytes)
+    context.user_data['photo_bytes'] = photo_bytes.getvalue()
+    
     await update.message.reply_text("✅ رسید دریافت شد.\n💰 مبلغ دریافتی را به ریال وارد کنید:")
     return AMOUNT_RECEIVED
 
 async def amount_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         amount = int(update.message.text.replace(',', '').strip())
-        context.user_data['amount_received'] = amount
-        diff = amount - context.user_data.get('amount_calculated', 0)
-        bonus = diff if diff > 0 else 0
-        discount = abs(diff) if diff < 0 else 0
-        context.user_data['bonus'] = bonus
-        context.user_data['discount'] = discount
+        calculated = context.user_data.get('amount_calculated', 0)
+        
+        context.user_data.update({
+            'amount_received': amount,
+            'bonus': max(amount - calculated, 0),
+            'discount': max(calculated - amount, 0)
+        })
+        
         await update.message.reply_text("👨‍💼 نام یا نام خانوادگی کارفرما را وارد کنید:")
         return CLIENT_NAME
     except ValueError:
-        await update.message.reply_text("عدد وارد کنید.")
+        await update.message.reply_text("⚠️ لطفاً یک عدد معتبر وارد کنید.")
         return AMOUNT_RECEIVED
 
 async def client_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -220,104 +320,90 @@ async def client_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return CLIENT_PHONE
 
 async def client_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['client_phone'] = update.message.text
+    phone = update.message.text.strip()
+    if not (phone.startswith("09") and len(phone) == 11 and phone.isdigit()):
+        await update.message.reply_text("شماره تماس نامعتبر است. لطفاً شماره را با فرمت 09123456789 وارد کنید.")
+        return CLIENT_PHONE
+    
+    context.user_data['client_phone'] = phone
     await update.message.reply_text("📝 توضیحات سرویس را وارد کنید:")
     return DESCRIPTION
 
 async def description(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['description'] = update.message.text
-    data = {
-        'کد کاربر': context.user_data['user_id'],
-        'زمان شروع': context.user_data['jalali_start'],
-        'زمان پایان': context.user_data['jalali_end'],
-        'نوع سرویس': context.user_data['service_type'],
-        'مبلغ محاسبه‌شده': context.user_data.get('amount_calculated', 0),
-        'مبلغ دریافتی': context.user_data.get('amount_received', 0),
-        'انعام': context.user_data.get('bonus', 0),
-        'تخفیف': context.user_data.get('discount', 0),
-        'نام کارفرما': context.user_data.get('client_name', ''),
-        'شماره کارفرما': context.user_data.get('client_phone', '')
+    
+    # ذخیره اطلاعات در دیتابیس
+    service_data = {
+        'user_id': context.user_data['user_id'],
+        'start_time': context.user_data['jalali_start'],
+        'end_time': context.user_data['jalali_end'],
+        'service_type': context.user_data['service_type'],
+        'calculated_amount': context.user_data.get('amount_calculated', 0),
+        'received_amount': context.user_data.get('amount_received', 0),
+        'bonus': context.user_data.get('bonus', 0),
+        'discount': context.user_data.get('discount', 0),
+        'client_name': context.user_data.get('client_name', ''),
+        'client_phone': context.user_data.get('client_phone', ''),
+        'description': context.user_data.get('description', '')
     }
-    save_service_data(data)
-    name = context.user_data['name']
-    await update.message.reply_text(f"👋 {name} جان، خداقوت!\nورود شما را به ناوگان بین المللی جهان تبریک عرض میکنیم!!!\nنوع سرویس شما: {context.user_data['service_type']}")
+    
+    save_service(service_data)
+    
+    await update.message.reply_text(
+        f"✅ سرویس با موفقیت ثبت شد!\n"
+        f"نوع سرویس: {context.user_data['service_type']}\n"
+        f"مدت زمان: {context.user_data.get('duration_minutes', 0)} دقیقه"
+    )
+    
+    await show_main_menu(update, context)
     return ConversationHandler.END
 
 # --- گزارش‌ها ---
 async def reports(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    
     keyboard = [
         [InlineKeyboardButton("📅 روزانه", callback_data='report_daily')],
         [InlineKeyboardButton("📆 هفتگی", callback_data='report_weekly')],
         [InlineKeyboardButton("🗓️ ماهانه", callback_data='report_monthly')],
         [InlineKeyboardButton("🔍 دلخواه", callback_data='report_custom')]
     ]
-    await query.message.reply_text("📌 نوع گزارش را انتخاب کنید:", reply_markup=InlineKeyboardMarkup(keyboard))
+    
+    await query.edit_message_text(
+        "📌 نوع گزارش را انتخاب کنید:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
     return ConversationHandler.END
 
-# --- ثبت دستی سرویس ---
-async def manual_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    await query.message.reply_text("📅 تاریخ سرویس را به فرمت شمسی وارد کنید (مثال: 1403/08/15):")
-    return 100  # DATE_PICK
+# --- مدیریت خطاها ---
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.error(msg="Exception while handling an update:", exc_info=context.error)
+    
+    if update.message:
+        await update.message.reply_text(
+            "⚠️ خطایی رخ داد. لطفاً دوباره امتحان کنید یا با پشتیبانی تماس بگیرید."
+        )
+    else:
+        await update.callback_query.edit_message_text(
+            "⚠️ خطایی رخ داد. لطفاً دوباره امتحان کنید."
+        )
 
-async def date_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['date_manual'] = update.message.text
-    await update.message.reply_text("⏰ ساعت شروع سرویس را وارد کنید (مثال: 09:30):")
-    return 101  # TIME_START
-
-async def time_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['time_start'] = update.message.text
-    await update.message.reply_text("🔚 ساعت پایان سرویس را وارد کنید (مثال: 11:45):")
-    return 102  # TIME_END
-
-async def time_end(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['time_end'] = update.message.text
-    await update.message.reply_text("نوع سرویس را انتخاب کنید:", reply_markup=InlineKeyboardMarkup([
-        [InlineKeyboardButton("⏰ ساعتی", callback_data='type_hourly_manual')],
-        [InlineKeyboardButton("📦 پروژه‌ای", callback_data='type_project_manual')]
-    ]))
-    return ConversationHandler.END
-
-# --- ثبت رویداد ---
-async def event_register(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    await query.message.reply_text("📝 شرح رویداد را وارد کنید:")
-    return EVENT_DESC
-
-async def event_desc(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['event_desc'] = update.message.text
-    await update.message.reply_text("⏰ زمان یادآوری را وارد کنید (مثال: 14:30):")
-    return EVENT_TIME
-
-async def event_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    time_input = update.message.text.strip()
-    now = datetime.now()
-    hour, minute = map(int, time_input.split(":"))
-    alarm_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-    context.user_data['alarm_time'] = alarm_time
-    scheduler.add_job(send_event_reminder, 'date', run_date=alarm_time, args=[update, context])
-    await update.message.reply_text("✅ یادآوری تنظیم شد.")
-    await show_main_menu(update, context)
-    return ConversationHandler.END
-
-async def send_event_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    desc = context.job.args[2].user_data.get('event_desc', '')
-    await context.bot.send_message(chat_id=update.effective_chat.id, text=f"🔔 یادآوری:\n{desc}")
-
-# --- Schedule ---
-scheduler = BackgroundScheduler()
-scheduler.start()
-
-# --- اجرای ربات ---
-if __name__ == '__main__':
-    app = ApplicationBuilder().token(TOKEN).build()
-
-    conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("start", start)],
+# --- تنظیمات اصلی ربات ---
+def main():
+    # اطمینان از وجود دیتابیس
+    init_db()
+    
+    # ساخت نمونه ربات
+    token = os.environ.get('TELEGRAM_BOT_TOKEN')
+    if not token:
+        raise ValueError("لطفاً توکن ربات را در متغیر محیطی TELEGRAM_BOT_TOKEN تنظیم کنید!")
+    
+    app = ApplicationBuilder().token(token).build()
+    
+    # مدیریت مکالمه ثبت نام
+    registration_conv = ConversationHandler(
+        entry_points=[CommandHandler('start', start)],
         states={
             NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_name)],
             FAMILY: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_family)],
@@ -325,8 +411,9 @@ if __name__ == '__main__':
         },
         fallbacks=[]
     )
-
-    new_service_conv = ConversationHandler(
+    
+    # مدیریت مکالمه سرویس جدید
+    service_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(new_service, pattern='new_service')],
         states={
             LOCATION_START: [MessageHandler(filters.LOCATION, location_start)],
@@ -341,21 +428,17 @@ if __name__ == '__main__':
         },
         fallbacks=[]
     )
-
-    report_handler = CallbackQueryHandler(reports, pattern='reports')
-    event_conversation = ConversationHandler(
-        entry_points=[CallbackQueryHandler(event_register, pattern='event_register')],
-        states={
-            EVENT_DESC: [MessageHandler(filters.TEXT & ~filters.COMMAND, event_desc)],
-            EVENT_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, event_time)]
-        },
-        fallbacks=[]
-    )
-
-    app.add_handler(conv_handler)
-    app.add_handler(new_service_conv)
-    app.add_handler(report_handler)
-    app.add_handler(event_conversation)
-
-    print("ربات در حال اجرا...")
+    
+    # اضافه کردن هندلرها
+    app.add_handler(registration_conv)
+    app.add_handler(service_conv)
+    app.add_handler(CallbackQueryHandler(reports, pattern='reports'))
+    app.add_handler(CallbackQueryHandler(show_main_menu, pattern='cancel_end'))
+    app.add_error_handler(error_handler)
+    
+    # راه‌اندازی ربات
+    logger.info("ربات در حال راه‌اندازی...")
     app.run_polling()
+
+if __name__ == '__main__':
+    main()
